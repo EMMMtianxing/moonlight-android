@@ -6,6 +6,10 @@
 #include <arpa/inet.h>
 #include <string.h>
 
+#include <stdint.h>
+
+#include <opus.h>
+
 #include "minisdl.h"
 #include "controller_type.h"
 #include "controller_list.h"
@@ -306,4 +310,55 @@ JNIEXPORT jboolean JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_guessControllerHasShareButton(JNIEnv *env, jclass clazz, jint vendorId, jint productId) {
     // Xbox Elite and DualSense Edge controllers have paddles
     return SDL_IsJoystickXboxSeriesX(vendorId, productId);
+}
+
+JNIEXPORT jlong JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_opusEncoderCreate(JNIEnv *env, jclass clazz,
+        jint sampleRate, jint channels, jint bitrate) {
+    int error = OPUS_OK;
+    OpusEncoder *enc = opus_encoder_create((opus_int32)sampleRate, (int)channels, OPUS_APPLICATION_VOIP, &error);
+    if (enc == NULL || error != OPUS_OK) {
+        if (enc != NULL) {
+            opus_encoder_destroy(enc);
+        }
+        return 0;
+    }
+    if (bitrate > 0) {
+        opus_encoder_ctl(enc, OPUS_SET_BITRATE((opus_int32)bitrate));
+    }
+    return (jlong)(intptr_t)enc;
+}
+
+JNIEXPORT jint JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_opusEncoderEncode(JNIEnv *env, jclass clazz,
+        jlong encoderPtr, jbyteArray pcmBytes, jint frameSamples, jbyteArray outPacket) {
+    OpusEncoder *enc = (OpusEncoder *)(intptr_t)encoderPtr;
+    if (enc == NULL || pcmBytes == NULL || outPacket == NULL || frameSamples <= 0) {
+        return -1;
+    }
+
+    opus_int16 pcmBuf[2880 * 2];
+    jsize inLen = (*env)->GetArrayLength(env, pcmBytes);
+    jsize outCap = (*env)->GetArrayLength(env, outPacket);
+    if (inLen <= 0 || inLen > (jsize)sizeof(pcmBuf) || outCap <= 0) {
+        return -1;
+    }
+
+    (*env)->GetByteArrayRegion(env, pcmBytes, 0, inLen, (jbyte *)pcmBuf);
+
+    unsigned char outBuf[4000];
+    opus_int32 maxBytes = outCap < (jsize)sizeof(outBuf) ? outCap : (opus_int32)sizeof(outBuf);
+    opus_int32 encoded = opus_encode(enc, pcmBuf, (int)frameSamples, outBuf, maxBytes);
+    if (encoded > 0) {
+        (*env)->SetByteArrayRegion(env, outPacket, 0, encoded, (const jbyte *)outBuf);
+    }
+    return (jint)encoded;
+}
+
+JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_opusEncoderDestroy(JNIEnv *env, jclass clazz, jlong encoderPtr) {
+    OpusEncoder *enc = (OpusEncoder *)(intptr_t)encoderPtr;
+    if (enc != NULL) {
+        opus_encoder_destroy(enc);
+    }
 }
