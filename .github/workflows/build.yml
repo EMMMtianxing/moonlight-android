@@ -1,0 +1,35 @@
+name: Build Moonlight APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install SDK 34 and NDK 27
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" "ndk;27.0.12077973"
+      - name: Build APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleNonRootRelease --no-daemon
+      - name: Sign APK
+        run: |
+          UNSIGNED=$(find app/build/outputs/apk/nonRoot/release -name "*.apk" | head -n 1)
+          keytool -genkeypair -v -keystore release.keystore -alias moonlight -keyalg RSA -keysize 2048 -validity 10000 -storepass 123456 -keypass 123456 -dname "CN=Moonlight, OU=Mod, O=Custom, L=CN, S=CN, C=CN"
+          "${ANDROID_HOME}/build-tools/34.0.0/zipalign" -p -f 4 "$UNSIGNED" aligned.apk
+          "${ANDROID_HOME}/build-tools/34.0.0/apksigner" sign --ks release.keystore --ks-pass pass:123456 --key-pass pass:123456 --ks-key-alias moonlight --out moonlight-axixi-mic-android6-13.apk aligned.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moonlight-axixi-mic-apk
+          path: moonlight-axixi-mic-android6-13.apk
