@@ -9,6 +9,7 @@ import android.media.MediaRecorder;
 import android.os.Build;
 
 import com.limelight.LimeLog;
+import com.limelight.nvstream.jni.MoonBridge;
 
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
@@ -37,6 +38,8 @@ public class MicUplinkConnection {
     private Thread workerThread;
     private AudioRecord audioRecord;
     private MediaCodec encoder;
+    private long nativeOpusEncoder;
+    private byte[] nativeOpusOutBuffer;
     private DatagramSocket socket;
     private long nextPresentationTimeUs;
     private int sequenceNumber;
@@ -72,7 +75,7 @@ public class MicUplinkConnection {
         this.frameBytes = (sampleRate * frameMs / 1000) * channels * 2;
     }
 
-    public static boolean isSupported() {
+    private static boolean hasSystemOpusEncoder() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             return false;
         }
@@ -88,7 +91,11 @@ public class MicUplinkConnection {
         }
     }
 
-    public boolean start() {
+        public static boolean isSupported() {
+        return true;
+    }
+
+public boolean start() {
         if (!isConfigurationSupported()) {
             LimeLog.warning("mic-uplink configuration rejected: " + getLastErrorMessage());
             return false;
@@ -179,12 +186,37 @@ public class MicUplinkConnection {
             socket = new DatagramSocket();
             socket.connect(new InetSocketAddress(serverAddress, hostPort));
 
-            encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS);
-            MediaFormat format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, sampleRate, channels);
-            format.setInteger(MediaFormat.KEY_BIT_RATE, OPUS_BITRATE);
-            format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, frameBytes);
-            encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-            encoder.start();
+                        boolean useSystemEncoder = hasSystemOpusEncoder();
+            if (useSystemEncoder) {
+                try {
+                    encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_AUDIO_OPUS);
+                    MediaFormat format = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_OPUS, sampleRate, channels);
+                    format.setInteger(MediaFormat.KEY_BIT_RATE, OPUS_BITRATE);
+                    format.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, frameBytes);
+                    encoder.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+                    encoder.start();
+                }
+                catch (Exception e) {
+                    LimeLog.warning("System Opus MediaCodec failed, falling back to libopus: " + e.getMessage());
+                    if (encoder != null) {
+                        try {
+                            encoder.release();
+                        }
+                        catch (Exception ignored) {
+                        }
+                        encoder = null;
+                    }
+                    useSystemEncoder = false;
+                }
+            }
+            if (!useSystemEncoder) {
+                nativeOpusEncoder = MoonBridge.opusEncoderCreate(sampleRate, channels, OPUS_BITRATE);
+                if (nativeOpusEncoder == 0) {
+                    throw new IllegalStateException("Unable to initialize native libopus encoder");
+                }
+                nativeOpusOutBuffer = new byte[4000];
+                LimeLog.info("mic-uplink using native libopus encoder");
+            }
 
             int minBufferSize = AudioRecord.getMinBufferSize(
                     sampleRate,
@@ -208,15 +240,26 @@ public class MicUplinkConnection {
             LimeLog.info("mic-uplink capture and encoder initialized");
             startupLatch.countDown();
 
+            int frameSamples = (sampleRate * frameMs) / 1000;
             while (running) {
                 if (!readFully(pcmFrame)) {
                     break;
                 }
 
                 long presentationTimeUs = nextPresentationTimeUs;
-                queueInputFrame(pcmFrame, presentationTimeUs);
                 nextPresentationTimeUs += frameMs * 1000L;
-                drainEncoder(bufferInfo);
+
+                if (nativeOpusEncoder != 0) {
+                    int encoded = MoonBridge.opusEncoderEncode(
+                            nativeOpusEncoder, pcmFrame, frameSamples, nativeOpusOutBuffer);
+                    if (encoded > 0) {
+                        sendPacket(ByteBuffer.wrap(nativeOpusOutBuffer, 0, encoded), presentationTimeUs);
+                    }
+                }
+                else {
+                    queueInputFrame(pcmFrame, presentationTimeUs);
+                    drainEncoder(bufferInfo);
+                }
             }
         }
         catch (Exception e) {
@@ -339,7 +382,13 @@ public class MicUplinkConnection {
             encoder = null;
         }
 
-        if (socket != null) {
+                if (nativeOpusEncoder != 0) {
+            MoonBridge.opusEncoderDestroy(nativeOpusEncoder);
+            nativeOpusEncoder = 0;
+        }
+        nativeOpusOutBuffer = null;
+
+if (socket != null) {
             socket.close();
             socket = null;
         }
