@@ -469,5 +469,11 @@ public class MoonBridge {
 
     public static native boolean guessControllerHasShareButton(int vendorId, int productId);
 
-    public static native void init();
+        public static native long opusEncoderCreate(int sampleRate, int channels, int bitrate);
+
+    public static native int opusEncoderEncode(long encoderPtr, byte[] pcmBytes, int frameSamples, byte[] outPacket);
+
+    public static native void opusEncoderDestroy(long encoderPtr);
+
+public static native void init();
 }
